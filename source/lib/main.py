@@ -1,42 +1,37 @@
-# shortCut  : command + \
+# shortCut  : command + d
 # menuTitle : Robocast
 
 import os
+from thefuzz import fuzz  # noqa: F401
 import vanilla
 import plistlib
 import configparser
 from AppKit import NSScreen, NSColor
 import AppKit
 from mojo.UI import StatusInteractivePopUpWindow, OpenScriptWindow, getDefault
+from mojo.tools import ScriptRunner as runner
 import subprocess
 
 from lib.UI import preferences
-from AppKit import NSEventModifierFlagCommand, NSEventModifierFlagShift, NSEventModifierFlagOption, NSEventModifierFlagControl
-
-
-
-MODIFIER_MAP = {
-131072:  "shift",
-262144:  "control",
-524288:  "option",
-1048576: "command",
-786432:  "control + option",
-393216:  "control + shift",
-1310720: "control + command",
-1572864: "option + command",
-655360:  "shift + option",
-1179648: "command + shift",
-917504:  "control + shift + option",
-1703936: "option + command + shift",
-1835008: "control + option + command",
-}
+from AppKit import (
+    NSEventModifierFlagCommand,
+    NSEventModifierFlagShift,
+    NSEventModifierFlagOption,
+    NSEventModifierFlagControl,
+)
+from lib.eventTools.eventManager import (
+    EventManager,
+    getToolOrder,
+    setActiveEventToolByIndex,
+)
 
 MODIFIER_SYMBOLS = {
-"shift": "⇧",
-"control": "⌃",
-"option": "⌥",
-"command": "⌘",
+    "shift": "⇧",
+    "control": "⌃",
+    "option": "⌥",
+    "command": "⌘",
 }
+
 
 class Robocast(object):
     def __init__(self):
@@ -67,12 +62,19 @@ class Robocast(object):
         width = 500
         height = 200
 
+        self.icon_size = 25
+
         screen = NSScreen.mainScreen()
         screenRect = screen.frame()
         (screenX, screenY), (screenW, screenH) = screenRect
         screenY = -(screenY + screenH)  # convert to vanilla coordinate system
         x = screenX + ((screenW - width) / 2)
         y = screenY + ((screenH - height) / 2)
+
+        self.readPreferences()
+
+        if self.displayToolbar:
+            height = 260
 
         self.w = StatusInteractivePopUpWindow((x, y, width, height), screen=screen)
 
@@ -92,9 +94,9 @@ class Robocast(object):
 
         """using EditText because SearchBox overrides tab and Enter buttons"""
         self.w.list = vanilla.List(
-            (10, 50, -10, -20),
+            (10, 50, -10, -65 if self.displayToolbar else -30),
             [],
-            columnDescriptions=[{"title":"name"}, {"title":"desc", "width":120}],
+            columnDescriptions=[{"title": "name"}, {"title": "desc", "width": 120}],
             showColumnTitles=False,
             allowsMultipleSelection=0,
             doubleClickCallback=self.runScript,
@@ -106,18 +108,40 @@ class Robocast(object):
         table_ns.setFocusRingType_(1)
         table_ns.setCornerRadius_(2)
         self.w.list.getNSScrollView().setCornerRadius_(10)
-        #self.w.list.getNSScrollView().setBorderType_(NSNoBorder)
-
 
         text = AppKit.NSAttributedString.alloc().initWithString_attributes_(
             "⏎ : Run Script    ⌘ ⏎ : Open Script    ⌘ ⌥ , : Preferences",
             {
                 AppKit.NSForegroundColorAttributeName: NSColor.tertiaryLabelColor(),
-                AppKit.NSFontAttributeName : AppKit.NSFont.systemFontOfSize_weight_(12, AppKit.NSFontWeightLight)
-            }
+                AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_weight_(
+                    12, AppKit.NSFontWeightLight
+                ),
+            },
         )
-
         self.w.label = vanilla.TextBox((10, -20, -10, 17), text)
+
+        if self.displayToolbar:
+            limit = 15
+            if 0 < self.limitToolbar < 15:
+                limit = self.limitToolbar
+            to_use = EventManager.getOrderedEvents()[:limit]
+            for index, event in enumerate(to_use):
+                image = event.getToolbarIcon().copy()
+                image.resizeTo_(self.icon_size)
+                image.setTemplate_(True)
+
+                vv = ((width - (10 + 10)) / len(to_use)) - self.icon_size
+                # print(vv)
+                var = exec(f"""self.w.button_{type(event).__name__} = vanilla.ImageButton(
+                    (({self.icon_size + vv}*index)+10, 200, self.icon_size, self.icon_size),
+                    imageObject=image,
+                    callback=self.contentCallback,
+                    bordered=False,
+                )
+                """)  # noqa: F841
+                exec(
+                    f"self.w.button_{type(event).__name__}.identifier = '{type(event).__name__}'"
+                )
 
         # off Window
 
@@ -140,11 +164,10 @@ class Robocast(object):
             callback=self.openScriptInScriptingWindow,
         )
 
-        self.w.togglePreferencesDrawer_button = vanilla.Button(
-            (10, 300, -10, 20), "Preferences", callback=self.togglePreferencesDrawer
+        self.w.openPrefs_button = vanilla.Button(
+            (10, 300, -10, 20), "Preferences", callback=self.openPrefs
         )
 
-        self.readPreferences()
         self.lastScriptRead()
 
         # Bindings
@@ -152,23 +175,29 @@ class Robocast(object):
         self.w.next_button.bind("downarrow", [])
         self.w.setDefaultButton(self.w.ok_button)
         self.w.closeWindow_button.bind(chr(27), [])  # esc
-        self.w.togglePreferencesDrawer_button.bind(",", ["command", "option"])
-        
+        self.w.openPrefs_button.bind(",", ["command", "option"])
+
         open_script = self.w.scriptingWindow_button.getNSButton()
         open_script.setKeyEquivalent_("\r")
         open_script.setKeyEquivalentModifierMask_(AppKit.NSEventModifierFlagCommand)
 
-
-
         self.w.getNSWindow().makeFirstResponder_(self.w.search_box.getNSTextField())
-
         self.w.open()
+
+        # DockerController(self.w)
+
+    def contentCallback(self, sender):
+        idr = sender.identifier
+        idx = getToolOrder().index(idr)
+        if idx is not None:
+            setActiveEventToolByIndex(idx)
+            self.w.close()
 
     # # # # # # # #
     # PREFERENCES
     # # # # # # # #
 
-    def togglePreferencesDrawer(self, sender):
+    def openPrefs(self, sender):
         # self.d.toggle()
         if os.path.exists(self.preferencesFile):
             subprocess.call(("open", self.preferencesFile))
@@ -179,62 +208,28 @@ class Robocast(object):
             config = configparser.ConfigParser()
             config.read(self.preferencesFile)
 
+            if "display" in config["TOOLS"]:
+                self.displayToolbar = (
+                    False
+                    if [config["TOOLS"]["display"]][0].lower() == "false"
+                    else True
+                )
+            if "limit" in config["TOOLS"]:
+                self.limitToolbar = int([config["TOOLS"]["limit"]][0])
             if "scriptsDir" in config["PATHS"]:
                 self.scriptsDirectory = [config["PATHS"]["scriptsDir"]][0]
-
             if "extensionsDir" in config["PATHS"]:
                 self.extensionsDirectory = [config["PATHS"]["extensionsDir"]][0]
-
             if "rememberLast" in config["REMEMBER"]:
                 self.rememberLast = int([config["REMEMBER"]["rememberLast"]][0])
-
             if "value" in config["SEARCHLOCAL"]:
                 self.searchLocal = int([config["SEARCHLOCAL"]["value"]][0])
-
             if "textEditor" in config["EDITOR"]:
                 self.editor = str([config["EDITOR"]["textEditor"]][0]).lower()
-
             if "searchUpDir" in config["SEARCHLOCAL"]:
                 self.searchUpDir = int([config["SEARCHLOCAL"]["searchUpDir"]][0])
 
-        self.searchAll("sender")
-
-    # def preferencesChanged(self, sender):
-    #     if sender.getTitle() == "Extensions":
-    #         newPath = GetFolder()
-    #         if newPath != None:
-    #             self.extensionsDirectory = newPath
-    #             self.d.extensions_path = newPath
-    #             self.searchExtensionsDirectory(newPath)
-    #     elif sender.getTitle() == "Scripts":
-    #         newPath = GetFolder()
-    #         if newPath != None:
-    #             self.scriptsDirectory = newPath
-    #             self.d.scripts_path = newPath
-    #             self.searchScriptsDirectory(newPath)
-    #     self.rememberLast = self.d.remember_count.get()
-    #     self.searchLocal = self.d.local_search_checkbox.get()
-    #     self.searchUpDir = self.d.local_search_count.get()
-    #     self.writePreferences(sender)
-    #     self.searchAll(sender)
-
-    # def writePreferences(self, sender):
-    #     # Gets preferences from window and writes to file
-    #     config = configparser.ConfigParser()
-    #     config.read(self.preferencesFile)
-
-    #     if self.extensionsDirectory != "default":
-    #         config["PATHS"]["extensionsDir"] = self.extensionsDirectory
-    #     if self.scriptsDirectory != "default":
-    #         config["PATHS"]["scriptsDir"] = self.scriptsDirectory
-    #     config["REMEMBER"] = {"rememberLast": self.d.remember_count.get()}
-    #     config["SEARCHLOCAL"] = {
-    #         "value": self.d.local_search_checkbox.get(),
-    #         "searchUpDir": self.d.local_search_count.get(),
-    #     }
-
-    #     with open(self.preferencesFile, "w") as configfile:
-    #         config.write(configfile)
+        self.searchAll()
 
     # LAST SCRIPT
     # Read/Write remembers the last script that was run so it can be quickly re-run
@@ -252,7 +247,7 @@ class Robocast(object):
             config.read(self.lastScriptFile)
             l = config["DEFAULT"]["lastFiles"]
             l = l.split(",")
-            l = [{"name":i, "desc":"script"} for i in l]
+            l = [{"name": i, "desc": "script"} for i in l]
             self.w.list.set(l)
             self.w.list.setSelection([0])
         else:
@@ -278,7 +273,7 @@ class Robocast(object):
     # FUNCTIONS
     # # # # # # # #
 
-    def searchAll(self, sender):
+    def searchAll(self):
         self.scripts = {"preferences": ("", "system"), "shortcuts": ("", "system")}
         if self.searchLocal == True:
             self.searchNearFont(self.searchUpDir)
@@ -405,10 +400,17 @@ class Robocast(object):
     def searchScripts(self, sender):
         i = sender.get()
         sub_list = []
-        #pprint(self.scripts)
+        # pprint(self.scripts)
 
-        for k,ss in self.scripts.items():
-            s,t = ss
+        # print("------------------")
+        for k, ss in self.scripts.items():
+            s, t = ss
+
+            # r = fuzz.ratio(k, i)
+            # # print(r, k, i)
+            # if r > 40:
+            #     sub_list.append((r,k,t))
+
             if i.lower().replace(" ", "") in k.lower().replace(" ", ""):
                 sub_list.append((k, t))
             elif i.lower().replace(" ", "_") in k.lower().replace(" ", ""):
@@ -418,23 +420,20 @@ class Robocast(object):
             elif i.lower() in t:
                 sub_list.append((k, t))
 
-        sub_list.sort()
-        sub_list = [{"name":i[0], "desc":i[1]} for i in sub_list]
+        # sub_list.sort(key=lambda x: x[0], reverse=True)
+        sub_list = [{"name": i[0], "desc": i[1]} for i in sub_list]
         self.w.list.set(sub_list)
         self.w.list.setSelection([0])
 
     def executeScript(self, file, sender):
-        with open(file, "r", encoding="utf-8") as f:
-            try:
-                code = compile(f.read(), file, "exec")
-                exec(code, globals())
-            except Exception as e:
-                print("Error. Script will not run. %s" % (e))
+        try:
+            runner(path=file)
+        except Exception as e:
+            print("Error. Script will not run. %s" % (e))
         self.lastScriptWrite(sender, file)
 
-
-
-    def get_keyboard_equivalent(self, menu_item):
+    def getKeyboardEquivalent(self, menu_item):
+        ### frank
         key_equivalent = menu_item.keyEquivalent()
         modifier_mask = menu_item.keyEquivalentModifierMask()
         modifiers = []
@@ -452,10 +451,13 @@ class Robocast(object):
         shorts = dict(getDefault("menuShortCuts", {}))
         shortcuts = []
         ### frank
-        for item, menu_item in preferences.preferencesMenuShortCuts.getShortCuts().items():
-            shortcut = self.get_keyboard_equivalent(menu_item)
+        for (
+            item,
+            menu_item,
+        ) in preferences.preferencesMenuShortCuts.getShortCuts().items():
+            shortcut = self.getKeyboardEquivalent(menu_item)
             if shortcut:
-                #print(item, "\t", shortcut)
+                # print(item, "\t", shortcut)
                 formatted = {"name": item, "desc": shortcut}
                 shortcuts.append(formatted)
         self.w.list.set(shortcuts)
@@ -465,23 +467,28 @@ class Robocast(object):
             value = self.w.list.get()[self.w.list.getSelection()[0]]
             # print(value)
             if value["name"] == "preferences":
-                self.togglePreferencesDrawer(sender)
+                self.openPrefs(sender)
             elif value["name"] == "shortcuts":
                 self.pullShortcuts()
             else:
-                if value["desc"] in ["script", "extension"]:
+                # print(value)
+                if value["desc"] in ["script", "ext"]:
                     self.closeWindow(sender)
-                    script_file = self.w.list.get()[self.w.list.getSelection()[0]]["name"]
+                    script_file = self.w.list.get()[self.w.list.getSelection()[0]][
+                        "name"
+                    ]
                     script_path = self.scripts[script_file][0]
                     if not os.path.exists(script_path):
                         print("script not found at path:", script_path)
                     else:
                         self.executeScript(script_path, sender)
 
-
     def openScriptInScriptingWindow(self, sender):
         if self.w.list.getSelection():
-            if self.w.list.get()[self.w.list.getSelection()[0]]["name"] not in ["preferences", "shortcuts"]:
+            if self.w.list.get()[self.w.list.getSelection()[0]]["name"] not in [
+                "preferences",
+                "shortcuts",
+            ]:
                 self.closeWindow(sender)
                 script_file = self.w.list.get()[self.w.list.getSelection()[0]]["name"]
                 script_path = self.scripts[script_file][0]
