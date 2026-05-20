@@ -1,8 +1,7 @@
-# shortCut  : command + d
+# shortCut  : command + option + space
 # menuTitle : Robocast
 
 import os
-from thefuzz import fuzz  # noqa: F401
 import vanilla
 import plistlib
 import configparser
@@ -94,7 +93,7 @@ class Robocast(object):
 
         """using EditText because SearchBox overrides tab and Enter buttons"""
         self.w.list = vanilla.List(
-            (10, 50, -10, -65 if self.displayToolbar else -30),
+            (10, 50, -10, -65 if self.displayToolbar else -25),
             [],
             columnDescriptions=[{"title": "name"}, {"title": "desc", "width": 120}],
             showColumnTitles=False,
@@ -131,7 +130,6 @@ class Robocast(object):
                 image.setTemplate_(True)
 
                 vv = ((width - (10 + 10)) / len(to_use)) - self.icon_size
-                # print(vv)
                 var = exec(f"""self.w.button_{type(event).__name__} = vanilla.ImageButton(
                     (({self.icon_size + vv}*index)+10, 200, self.icon_size, self.icon_size),
                     imageObject=image,
@@ -400,17 +398,8 @@ class Robocast(object):
     def searchScripts(self, sender):
         i = sender.get()
         sub_list = []
-        # pprint(self.scripts)
-
-        # print("------------------")
         for k, ss in self.scripts.items():
             s, t = ss
-
-            # r = fuzz.ratio(k, i)
-            # # print(r, k, i)
-            # if r > 40:
-            #     sub_list.append((r,k,t))
-
             if i.lower().replace(" ", "") in k.lower().replace(" ", ""):
                 sub_list.append((k, t))
             elif i.lower().replace(" ", "_") in k.lower().replace(" ", ""):
